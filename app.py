@@ -23,12 +23,18 @@ def init_db():
                 airport_pickup_sent INTEGER DEFAULT 0,
                 stay_location TEXT,
                 room_cleaned INTEGER DEFAULT 0,
-                assigned_gre_id INTEGER
+                assigned_gre_id INTEGER,
+                poc TEXT
             );
         '''))
         # Safely adds the departure column to your existing table without wiping your data
         try:
             s.execute(text("ALTER TABLE guests ADD COLUMN departure_time TEXT;"))
+        except Exception:
+            pass 
+        # Safely adds the POC column to your existing table
+        try:
+            s.execute(text("ALTER TABLE guests ADD COLUMN poc TEXT;"))
         except Exception:
             pass 
         s.commit()
@@ -88,7 +94,6 @@ def main():
                     st.rerun()
 
     # --- 3. ADMIN PORTAL ---
-    # --- 3. ADMIN PORTAL ---
     elif mode == "Admin Portal":
         # Initialize Cookie Manager
         cookie_manager = stx.CookieManager()
@@ -123,14 +128,12 @@ def main():
                     st.error("Invalid username or password.")
                     
         # --- ADMIN DASHBOARD ---
-        # --- ADMIN DASHBOARD ---
         if st.session_state.logged_in:
             st.success(f"Welcome, {st.session_state.user}!")
             if st.button("Logout"):
                 st.session_state.logged_in = False
                 st.session_state.user = ""
-                # If you implemented Part 1, keep the cookie delete here:
-                # cookie_manager.delete("admin_user") 
+                cookie_manager.delete("admin_user") # Destroy the cookie on logout
                 st.rerun()
 
             st.divider()
@@ -148,7 +151,6 @@ def main():
                 df = df.sort_values(by='arrival_dt', ascending=True, na_position='last')
 
                 # --- MOBILE UPGRADE 1: METRICS AT THE TOP ---
-                # Admins see exactly what needs attention the second the app opens
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Total Guests", len(df))
                 m2.metric("Pickups Pending", len(df[df['airport_pickup_sent'] == 0]))
@@ -169,9 +171,8 @@ def main():
                             st.success(f"✅ **{guest['name']}** arrives at {arr_time}. Room is clean.")
                     st.divider()
 
-                # --- MOBILE UPGRADE 2 & 3: EXPANDABLE CARDS & ONE-TAP TOGGLES ---
                 # --- MOBILE UPGRADE 2: SMART SEARCH & EXPANDABLE CARDS ---
-                st.subheader("Guest List")
+                st.subheader("📱 Guest Roster")
                 
                 # The New Smart Search Bar
                 guest_names = df['name'].tolist()
@@ -183,16 +184,23 @@ def main():
                     # Handle blank arrival times gracefully
                     arr_str = guest['arrival_time'] if pd.notna(guest['arrival_time']) else "Time TBD"
                     
-                    # MAGIC LOGIC: Check if this is the searched guest
+                    # Check if this is the searched guest
                     is_expanded = (searched_guest == guest['name'])
                     
-                    # --- NEW: INJECT INVISIBLE ANCHOR TARGET ---
+                    # INJECT INVISIBLE ANCHOR TARGET
                     st.markdown(f"<div id='guest-{guest['id']}'></div>", unsafe_allow_html=True)
                     
                     # Create the expandable card
                     with st.expander(f"👤 {guest['name']} | Arr: {arr_str}", expanded=is_expanded):
                         st.write(f"**Assigned Admin:** {guest['admin_owner']}")
                         st.write(f"**Departure:** {guest['departure_time'] if pd.notna(guest['departure_time']) else 'TBD'}")
+                        
+                        # --- DISPLAY POC AND GRE ---
+                        display_poc = guest['poc'] if 'poc' in guest and pd.notna(guest['poc']) else 'None'
+                        display_gre = guest['assigned_gre_id'] if pd.notna(guest['assigned_gre_id']) else 'Unassigned'
+                        
+                        st.write(f"**POC:** {display_poc}")
+                        st.write(f"**Assigned GRE (ID):** {display_gre}")
                         
                         st.markdown("**Quick Actions:**")
                         c1, c2 = st.columns(2)
@@ -219,21 +227,50 @@ def main():
                                     s.commit()
                                 st.rerun() 
 
-                    # --- NEW: TRIGGER AUTO-SCROLL JAVASCRIPT ---
+                    # --- TRIGGER AUTO-SCROLL JAVASCRIPT ---
                     if is_expanded:
                         components.html(
                             f"""
                             <script>
-                                // Target the invisible anchor we placed above the expander
                                 var element = window.parent.document.getElementById('guest-{guest['id']}');
                                 if (element) {{
-                                    // Smoothly scroll it right into the center of the screen
                                     element.scrollIntoView({{behavior: 'smooth', block: 'center'}});
                                 }}
                             </script>
                             """,
                             height=0
                         )
+
+                # --- MANAGE GUEST ITINERARIES ---
+                st.divider()
+                st.subheader("📅 Manage Guest Itineraries")
+                
+                selected_guest_itin = st.selectbox("Select a Guest to Assign Times:", ["-- Select Guest --"] + guest_names, key="itin_select")
+                
+                if selected_guest_itin != "-- Select Guest --":
+                    with st.form("update_times_form"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write("**Arrival**")
+                            arr_date = st.date_input("Arrival Date", format="DD/MM/YYYY")
+                            arr_time = st.time_input("Arrival Time")
+                        with col2:
+                            st.write("**Departure**")
+                            dep_date = st.date_input("Departure Date", format="DD/MM/YYYY")
+                            dep_time = st.time_input("Departure Time")
+                            
+                        if st.form_submit_button("Save Itinerary"):
+                            f_arr = f"{arr_date.strftime('%d/%m/%Y')} {arr_time.strftime('%H:%M')}"
+                            f_dep = f"{dep_date.strftime('%d/%m/%Y')} {dep_time.strftime('%H:%M')}"
+                            
+                            with conn.session as s:
+                                s.execute(
+                                    text("UPDATE guests SET arrival_time = :a, departure_time = :d WHERE name = :n"),
+                                    {"a": f_arr, "d": f_dep, "n": selected_guest_itin}
+                                )
+                                s.commit()
+                            st.success(f"Successfully saved itinerary for {selected_guest_itin}!")
+                            st.rerun()
             else:
                 st.info("No guests found in this view.")
 
@@ -261,7 +298,7 @@ def main():
             # --- BULK IMPORT (CSV) ---
             st.divider()
             st.subheader("Bulk Import (CSV)")
-            st.markdown("Upload a CSV with exactly 2 columns: `name` and `admin_username`")
+            st.markdown("Upload a CSV with exactly 3 columns: `name`, `admin_username`, and `poc`")
             
             file = st.file_uploader("Upload Guest CSV", type="csv")
             if file:
@@ -272,6 +309,7 @@ def main():
                             # Clean up strings to prevent whitespace issues causing duplicates
                             g_name = str(r['name']).strip()
                             a_user = str(r['admin_username']).strip()
+                            poc_name = str(r['poc']).strip() if 'poc' in r and pd.notna(r['poc']) else "Not Provided"
                             
                             # Auto-create Admin with default password 'password123'
                             s.execute(text("INSERT INTO admins (username, password) VALUES (:u, :p) ON CONFLICT DO NOTHING"),
@@ -283,10 +321,10 @@ def main():
                             
                             # Only insert if they DO NOT exist yet
                             if not existing:
-                                s.execute(text("INSERT INTO guests (name, admin_owner) VALUES (:n, :u)"),
-                                          {"n": g_name, "u": a_user})
+                                s.execute(text("INSERT INTO guests (name, admin_owner, poc) VALUES (:n, :u, :poc)"),
+                                          {"n": g_name, "u": a_user, "poc": poc_name})
                         s.commit()
-                    st.success("CSV Processed! New guests added (duplicates skipped).")
+                    st.success("CSV Processed! New guests added with their POCs.")
                     st.rerun()
 
 if __name__ == "__main__":
