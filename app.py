@@ -122,15 +122,19 @@ def main():
                     st.error("Invalid username or password.")
                     
         # --- ADMIN DASHBOARD ---
+        # --- ADMIN DASHBOARD ---
         if st.session_state.logged_in:
             st.success(f"Welcome, {st.session_state.user}!")
             if st.button("Logout"):
                 st.session_state.logged_in = False
                 st.session_state.user = ""
-                cookie_manager.delete("admin_user") # Destroy the cookie on logout
+                # If you implemented Part 1, keep the cookie delete here:
+                # cookie_manager.delete("admin_user") 
                 st.rerun()
 
-            # --- VIEW TOGGLE & FETCH DATA ---
+            st.divider()
+
+            # --- FETCH DATA ---
             view_mode = st.radio("Display Mode:", ["Only your guests", "All guests"], horizontal=True)
 
             if view_mode == "Only your guests":
@@ -139,65 +143,67 @@ def main():
                 df = conn.query("SELECT * FROM guests", ttl=0)
 
             if not df.empty:
-                # Convert string 'arrival_time' to actual datetime objects for sorting & alerts
                 df['arrival_dt'] = pd.to_datetime(df['arrival_time'], format='%d/%m/%Y %H:%M', errors='coerce')
                 df = df.sort_values(by='arrival_dt', ascending=True, na_position='last')
+
+                # --- MOBILE UPGRADE 1: METRICS AT THE TOP ---
+                # Admins see exactly what needs attention the second the app opens
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Total Guests", len(df))
+                m2.metric("Pickups Pending", len(df[df['airport_pickup_sent'] == 0]))
+                m3.metric("Rooms Unclean", len(df[df['room_cleaned'] == 0]))
+                st.divider()
 
                 # --- TODAY'S ARRIVAL ALERTS ---
                 today = pd.Timestamp.now().date()
                 today_guests = df[df['arrival_dt'].dt.date == today]
 
                 if not today_guests.empty:
-                    st.subheader("🚨 Today's Arrivals - Action Required")
+                    st.subheader("🚨 Today's Arrivals")
                     for _, guest in today_guests.iterrows():
                         arr_time = guest['arrival_dt'].strftime('%H:%M') if pd.notnull(guest['arrival_dt']) else "Unknown Time"
                         if guest['room_cleaned'] == 0:
-                            st.error(f"⚠️ **{guest['name']}** arrives today at {arr_time}. **Room is NOT clean!**")
+                            st.error(f"⚠️ **{guest['name']}** arrives at {arr_time}. **Room NOT clean!**")
                         else:
-                            st.success(f"✅ **{guest['name']}** arrives today at {arr_time}. Room is clean.")
+                            st.success(f"✅ **{guest['name']}** arrives at {arr_time}. Room is clean.")
                     st.divider()
 
-                # --- DASHBOARD METRICS & TABLE ---
-                st.subheader("Guest Overview")
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Total Guests (in view)", len(df))
-                m2.metric("Pickups Pending", len(df[df['airport_pickup_sent'] == 0]))
-                m3.metric("Rooms Unclean", len(df[df['room_cleaned'] == 0]))
+                # --- MOBILE UPGRADE 2 & 3: EXPANDABLE CARDS & ONE-TAP TOGGLES ---
+                st.subheader("📱 Guest Roster (Tap to Expand)")
                 
-                display_df = df.drop(columns=['arrival_dt'])
-                st.dataframe(display_df, use_container_width=True)
-
-                # --- MANAGE GUEST ITINERARIES ---
-                st.divider()
-                st.subheader("📅 Manage Guest Itineraries")
-                
-                guest_list = df['name'].tolist()
-                selected_guest = st.selectbox("Select a Guest to Assign Times:", ["-- Select Guest --"] + guest_list)
-                
-                if selected_guest != "-- Select Guest --":
-                    with st.form("update_times_form"):
+                for _, guest in df.iterrows():
+                    # Handle blank arrival times gracefully
+                    arr_str = guest['arrival_time'] if pd.notna(guest['arrival_time']) else "Time TBD"
+                    
+                    # Create an expandable card for each guest
+                    with st.expander(f"👤 {guest['name']} | Arr: {arr_str}"):
+                        st.write(f"**Assigned Admin:** {guest['admin_owner']}")
+                        st.write(f"**Departure:** {guest['departure_time'] if pd.notna(guest['departure_time']) else 'TBD'}")
+                        
+                        st.markdown("**Quick Actions:**")
                         c1, c2 = st.columns(2)
+                        
+                        # One-Tap Toggle: Room Cleaned
                         with c1:
-                            st.write("**Arrival**")
-                            arr_date = st.date_input("Arrival Date", format="DD/MM/YYYY")
-                            arr_time = st.time_input("Arrival Time")
+                            room_val = bool(guest['room_cleaned'])
+                            new_room = st.toggle("Room Cleaned", value=room_val, key=f"rm_{guest['id']}")
+                            if new_room != room_val:
+                                with conn.session as s:
+                                    s.execute(text("UPDATE guests SET room_cleaned = :r WHERE id = :id"), 
+                                              {"r": int(new_room), "id": guest['id']})
+                                    s.commit()
+                                st.rerun() # Refresh instantly to update the top metrics
+
+                        # One-Tap Toggle: Airport Pickup
                         with c2:
-                            st.write("**Departure**")
-                            dep_date = st.date_input("Departure Date", format="DD/MM/YYYY")
-                            dep_time = st.time_input("Departure Time")
-                            
-                        if st.form_submit_button("Save Itinerary"):
-                            f_arr = f"{arr_date.strftime('%d/%m/%Y')} {arr_time.strftime('%H:%M')}"
-                            f_dep = f"{dep_date.strftime('%d/%m/%Y')} {dep_time.strftime('%H:%M')}"
-                            
-                            with conn.session as s:
-                                s.execute(
-                                    text("UPDATE guests SET arrival_time = :a, departure_time = :d WHERE name = :n"),
-                                    {"a": f_arr, "d": f_dep, "n": selected_guest}
-                                )
-                                s.commit()
-                            st.success(f"Successfully saved itinerary for {selected_guest}!")
-                            st.rerun()
+                            pickup_val = bool(guest['airport_pickup_sent'])
+                            new_pickup = st.toggle("Pickup Sent", value=pickup_val, key=f"pk_{guest['id']}")
+                            if new_pickup != pickup_val:
+                                with conn.session as s:
+                                    s.execute(text("UPDATE guests SET airport_pickup_sent = :p WHERE id = :id"), 
+                                              {"p": int(new_pickup), "id": guest['id']})
+                                    s.commit()
+                                st.rerun() # Refresh instantly to update the top metrics
             else:
                 st.info("No guests found in this view.")
 
