@@ -3,6 +3,7 @@ import pandas as pd
 from sqlalchemy import text
 import extra_streamlit_components as stx
 import datetime
+import streamlit.components.v1 as components
 
 # --- INITIALIZE BUILT-IN SQL CONNECTION ---
 conn = st.connection("postgresql", type="sql")
@@ -170,7 +171,7 @@ def main():
 
                 # --- MOBILE UPGRADE 2 & 3: EXPANDABLE CARDS & ONE-TAP TOGGLES ---
                 # --- MOBILE UPGRADE 2: SMART SEARCH & EXPANDABLE CARDS ---
-                st.subheader("📱 Guest Roster")
+                st.subheader("Guest List")
                 
                 # The New Smart Search Bar
                 guest_names = df['name'].tolist()
@@ -182,10 +183,13 @@ def main():
                     # Handle blank arrival times gracefully
                     arr_str = guest['arrival_time'] if pd.notna(guest['arrival_time']) else "Time TBD"
                     
-                    # MAGIC LOGIC: If the name matches the search bar, force this card to pop open!
+                    # MAGIC LOGIC: Check if this is the searched guest
                     is_expanded = (searched_guest == guest['name'])
                     
-                    # Create an expandable card for each guest
+                    # --- NEW: INJECT INVISIBLE ANCHOR TARGET ---
+                    st.markdown(f"<div id='guest-{guest['id']}'></div>", unsafe_allow_html=True)
+                    
+                    # Create the expandable card
                     with st.expander(f"👤 {guest['name']} | Arr: {arr_str}", expanded=is_expanded):
                         st.write(f"**Assigned Admin:** {guest['admin_owner']}")
                         st.write(f"**Departure:** {guest['departure_time'] if pd.notna(guest['departure_time']) else 'TBD'}")
@@ -213,7 +217,23 @@ def main():
                                     s.execute(text("UPDATE guests SET airport_pickup_sent = :p WHERE id = :id"), 
                                               {"p": int(new_pickup), "id": guest['id']})
                                     s.commit()
-                                st.rerun()
+                                st.rerun() 
+
+                    # --- NEW: TRIGGER AUTO-SCROLL JAVASCRIPT ---
+                    if is_expanded:
+                        components.html(
+                            f"""
+                            <script>
+                                // Target the invisible anchor we placed above the expander
+                                var element = window.parent.document.getElementById('guest-{guest['id']}');
+                                if (element) {{
+                                    // Smoothly scroll it right into the center of the screen
+                                    element.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+                                }}
+                            </script>
+                            """,
+                            height=0
+                        )
             else:
                 st.info("No guests found in this view.")
 
