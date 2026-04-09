@@ -16,12 +16,18 @@ def init_db():
                 name TEXT NOT NULL,
                 admin_owner TEXT,
                 arrival_time TEXT,
+                departure_time TEXT,
                 airport_pickup_sent INTEGER DEFAULT 0,
                 stay_location TEXT,
                 room_cleaned INTEGER DEFAULT 0,
                 assigned_gre_id INTEGER
             );
         '''))
+        # This safely adds the departure column to your existing table without wiping your data
+        try:
+            s.execute(text("ALTER TABLE guests ADD COLUMN departure_time TEXT;"))
+        except Exception:
+            pass 
         s.commit()
 
 # --- APP UI ---
@@ -77,47 +83,108 @@ def main():
 
     # --- 3. ADMIN PORTAL ---
     elif mode == "Admin Portal":
-        if not st.session_state.logged_in:
-            st.subheader("Admin Login")
-            u = st.text_input("Username")
-            p = st.text_input("Password", type="password")
-            if st.button("Login"):
-                check = conn.query("SELECT * FROM admins WHERE username=:u AND password=:p", params={"u":u, "p":p}, ttl=0)
-                if not check.empty:
-                    st.session_state.logged_in = True
-                    st.session_state.user = u
-                    st.rerun()
-                else: st.error("Access Denied")
-        else:
-            st.sidebar.button("Logout", on_click=lambda: st.session_state.update({"logged_in": False}))
-            st.title(f"📊 Dashboard: {st.session_state.user}")
-            
-            # Dashboard Metrics
-            df = conn.query("SELECT * FROM guests WHERE admin_owner = :u", params={"u": st.session_state.user}, ttl=0)
-            
+        if st.session_state.logged_in:
+            st.success(f"Welcome, {st.session_state.user}!")
+            if st.button("Logout"):
+                st.session_state.logged_in = False
+                st.session_state.user = ""
+                st.rerun()
+
+            st.divider()
+
+            # --- 1. VIEW TOGGLE & FETCH DATA ---
+            view_mode = st.radio("Display Mode:", ["Only your guests", "All guests"], horizontal=True)
+
+            if view_mode == "Only your guests":
+                df = conn.query("SELECT * FROM guests WHERE admin_owner = :u", params={"u": st.session_state.user}, ttl=0)
+            else:
+                df = conn.query("SELECT * FROM guests", ttl=0)
+
             if not df.empty:
+                df['arrival_dt'] = pd.to_datetime(df['arrival_time'], format='%d/%m/%Y %H:%M', errors='coerce')
+                df = df.sort_values(by='arrival_dt', ascending=True, na_position='last')
+
+                # --- 2. TODAY'S ARRIVAL ALERTS ---
+                today = pd.Timestamp.now().date()
+                today_guests = df[df['arrival_dt'].dt.date == today]
+
+                if not today_guests.empty:
+                    st.subheader("🚨 Today's Arrivals - Action Required")
+                    for _, guest in today_guests.iterrows():
+                        arr_time = guest['arrival_dt'].strftime('%H:%M') if pd.notnull(guest['arrival_dt']) else "Unknown Time"
+                        if guest['room_cleaned'] == 0:
+                            st.error(f"⚠️ **{guest['name']}** arrives today at {arr_time}. **Room is NOT clean!**")
+                        else:
+                            st.success(f"✅ **{guest['name']}** arrives today at {arr_time}. Room is clean.")
+                    st.divider()
+
+                # --- 3. DASHBOARD METRICS & TABLE ---
+                st.subheader("Guest Overview")
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Total Dignitaries", len(df))
+                m1.metric("Total Guests (in view)", len(df))
                 m2.metric("Pickups Pending", len(df[df['airport_pickup_sent'] == 0]))
                 m3.metric("Rooms Unclean", len(df[df['room_cleaned'] == 0]))
-                st.dataframe(df, use_container_width=True)
-            
+                
+                display_df = df.drop(columns=['arrival_dt'])
+                st.dataframe(display_df, use_container_width=True)
+
+                # --- 4. NEW: MANAGE GUEST ITINERARIES ---
+                st.divider()
+                st.subheader("📅 Manage Guest Itineraries")
+                
+                # Create a list of guest names for the dropdown
+                guest_list = df['name'].tolist()
+                selected_guest = st.selectbox("Select a Guest to Assign Times:", ["-- Select Guest --"] + guest_list)
+                
+                if selected_guest != "-- Select Guest --":
+                    with st.form("update_times_form"):
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.write("**Arrival**")
+                            arr_date = st.date_input("Arrival Date", format="DD/MM/YYYY")
+                            arr_time = st.time_input("Arrival Time")
+                        with c2:
+                            st.write("**Departure**")
+                            dep_date = st.date_input("Departure Date", format="DD/MM/YYYY")
+                            dep_time = st.time_input("Departure Time")
+                            
+                        if st.form_submit_button("Save Itinerary"):
+                            # Format to match our existing logic (DD/MM/YYYY HH:MM)
+                            f_arr = f"{arr_date.strftime('%d/%m/%Y')} {arr_time.strftime('%H:%M')}"
+                            f_dep = f"{dep_date.strftime('%d/%m/%Y')} {dep_time.strftime('%H:%M')}"
+                            
+                            with conn.session as s:
+                                s.execute(
+                                    text("UPDATE guests SET arrival_time = :a, departure_time = :d WHERE name = :n"),
+                                    {"a": f_arr, "d": f_dep, "n": selected_guest}
+                                )
+                                s.commit()
+                            st.success(f"Successfully saved itinerary for {selected_guest}!")
+                            st.rerun()
+            else:
+                st.info("No guests found in this view.")
+
+            # --- 5. BULK IMPORT (CSV) - SIMPLIFIED ---
             st.divider()
             st.subheader("Bulk Import (CSV)")
-            file = st.file_uploader("Upload CSV", type="csv")
+            st.markdown("Upload a CSV with exactly 2 columns: `name` and `admin_username`")
+            
+            file = st.file_uploader("Upload Guest CSV", type="csv")
             if file:
                 data = pd.read_csv(file)
                 if st.button("Execute Import"):
                     with conn.session as s:
                         for _, r in data.iterrows():
-                            # Create Admin
+                            # Auto-create Admin with default password
                             s.execute(text("INSERT INTO admins (username, password) VALUES (:u, :p) ON CONFLICT DO NOTHING"),
-                                      {"u": r['admin_username'], "p": str(r['admin_password'])})
-                            # Create Guest
+                                      {"u": str(r['admin_username']), "p": "password123"})
+                            
+                            # Insert Guest (Arrival/Departure remain blank until assigned in app)
                             s.execute(text("INSERT INTO guests (name, admin_owner) VALUES (:n, :u)"),
-                                      {"n": r['name'], "u": r['admin_username']})
+                                      {"n": str(r['name']), "u": str(r['admin_username'])})
                         s.commit()
-                    st.success("CSV Processed and Sync'd to Cloud Database.")
+                    st.success("CSV Processed! Guests added. Assign their arrival times in the panel above.")
+                    st.rerun()
 
 if __name__ == "__main__":
     main()
