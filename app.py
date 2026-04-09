@@ -169,14 +169,24 @@ def main():
                     st.divider()
 
                 # --- MOBILE UPGRADE 2 & 3: EXPANDABLE CARDS & ONE-TAP TOGGLES ---
-                st.subheader("📱 Guest Roster (Tap to Expand)")
+                # --- MOBILE UPGRADE 2: SMART SEARCH & EXPANDABLE CARDS ---
+                st.subheader("📱 Guest Roster")
+                
+                # The New Smart Search Bar
+                guest_names = df['name'].tolist()
+                searched_guest = st.selectbox("🔍 Search to auto-open a guest's card:", ["-- View All --"] + guest_names)
+
+                st.markdown("*Tap any card below to expand manually:*")
                 
                 for _, guest in df.iterrows():
                     # Handle blank arrival times gracefully
                     arr_str = guest['arrival_time'] if pd.notna(guest['arrival_time']) else "Time TBD"
                     
+                    # MAGIC LOGIC: If the name matches the search bar, force this card to pop open!
+                    is_expanded = (searched_guest == guest['name'])
+                    
                     # Create an expandable card for each guest
-                    with st.expander(f"👤 {guest['name']} | Arr: {arr_str}"):
+                    with st.expander(f"👤 {guest['name']} | Arr: {arr_str}", expanded=is_expanded):
                         st.write(f"**Assigned Admin:** {guest['admin_owner']}")
                         st.write(f"**Departure:** {guest['departure_time'] if pd.notna(guest['departure_time']) else 'TBD'}")
                         
@@ -192,7 +202,7 @@ def main():
                                     s.execute(text("UPDATE guests SET room_cleaned = :r WHERE id = :id"), 
                                               {"r": int(new_room), "id": guest['id']})
                                     s.commit()
-                                st.rerun() # Refresh instantly to update the top metrics
+                                st.rerun() 
 
                         # One-Tap Toggle: Airport Pickup
                         with c2:
@@ -203,7 +213,7 @@ def main():
                                     s.execute(text("UPDATE guests SET airport_pickup_sent = :p WHERE id = :id"), 
                                               {"p": int(new_pickup), "id": guest['id']})
                                     s.commit()
-                                st.rerun() # Refresh instantly to update the top metrics
+                                st.rerun()
             else:
                 st.info("No guests found in this view.")
 
