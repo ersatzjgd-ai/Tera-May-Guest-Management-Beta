@@ -87,19 +87,36 @@ def main():
                     st.rerun()
 
     # --- 3. ADMIN PORTAL ---
+    # --- 3. ADMIN PORTAL ---
     elif mode == "Admin Portal":
+        # Initialize Cookie Manager
+        cookie_manager = stx.CookieManager()
+        
+        # Check if they already have a valid cookie from a previous day
+        saved_user = cookie_manager.get(cookie="admin_user")
+        if saved_user and not st.session_state.logged_in:
+            st.session_state.logged_in = True
+            st.session_state.user = saved_user
         
         # --- LOGIN SCREEN ---
         if not st.session_state.logged_in:
             st.title("🔐 Admin Login")
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
+            
+            # The new checkbox
+            remember_me = st.checkbox("Keep me logged in for 30 days")
+            
             if st.button("Login"):
                 admin_check = conn.query("SELECT * FROM admins WHERE username = :u AND password = :p", 
                                          params={"u": username, "p": password}, ttl=0)
                 if not admin_check.empty:
                     st.session_state.logged_in = True
                     st.session_state.user = username
+                    
+                    # Set the cookie if they checked the box
+                    if remember_me:
+                        cookie_manager.set("admin_user", username, expires_at=datetime.datetime.now() + datetime.timedelta(days=30))
                     st.rerun()
                 else:
                     st.error("Invalid username or password.")
@@ -110,9 +127,8 @@ def main():
             if st.button("Logout"):
                 st.session_state.logged_in = False
                 st.session_state.user = ""
+                cookie_manager.delete("admin_user") # Destroy the cookie on logout
                 st.rerun()
-
-            st.divider()
 
             # --- VIEW TOGGLE & FETCH DATA ---
             view_mode = st.radio("Display Mode:", ["Only your guests", "All guests"], horizontal=True)
