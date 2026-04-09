@@ -16,6 +16,7 @@ def init_db():
                 name TEXT NOT NULL,
                 admin_owner TEXT,
                 arrival_time TEXT,
+                departure_time TEXT,
                 airport_pickup_sent INTEGER DEFAULT 0,
                 stay_location TEXT,
                 room_cleaned INTEGER DEFAULT 0,
@@ -214,15 +215,24 @@ def main():
                 if st.button("Execute Import"):
                     with conn.session as s:
                         for _, r in data.iterrows():
+                            # Clean up strings to prevent whitespace issues causing duplicates
+                            g_name = str(r['name']).strip()
+                            a_user = str(r['admin_username']).strip()
+                            
                             # Auto-create Admin with default password 'password123'
                             s.execute(text("INSERT INTO admins (username, password) VALUES (:u, :p) ON CONFLICT DO NOTHING"),
-                                      {"u": str(r['admin_username']), "p": "password123"})
+                                      {"u": a_user, "p": "password123"})
                             
-                            # Insert Guest
-                            s.execute(text("INSERT INTO guests (name, admin_owner) VALUES (:n, :u)"),
-                                      {"n": str(r['name']), "u": str(r['admin_username'])})
+                            # Check if this guest already exists in the database
+                            existing = s.execute(text("SELECT id FROM guests WHERE name = :n AND admin_owner = :u"), 
+                                                 {"n": g_name, "u": a_user}).fetchone()
+                            
+                            # Only insert if they DO NOT exist yet
+                            if not existing:
+                                s.execute(text("INSERT INTO guests (name, admin_owner) VALUES (:n, :u)"),
+                                          {"n": g_name, "u": a_user})
                         s.commit()
-                    st.success("CSV Processed! Guests added. Assign their arrival times in the panel above.")
+                    st.success("CSV Processed! New guests added (duplicates skipped).")
                     st.rerun()
 
 if __name__ == "__main__":
