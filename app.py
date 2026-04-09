@@ -23,18 +23,21 @@ def init_db():
                 airport_pickup_sent INTEGER DEFAULT 0,
                 stay_location TEXT,
                 room_cleaned INTEGER DEFAULT 0,
-                assigned_gre_id INTEGER,
+                assigned_gre TEXT,
                 poc TEXT
             );
         '''))
-        # Safely adds the departure column to your existing table without wiping your data
+        # Safely adds new columns to your existing table without wiping your data
         try:
             s.execute(text("ALTER TABLE guests ADD COLUMN departure_time TEXT;"))
         except Exception:
             pass 
-        # Safely adds the POC column to your existing table
         try:
             s.execute(text("ALTER TABLE guests ADD COLUMN poc TEXT;"))
+        except Exception:
+            pass 
+        try:
+            s.execute(text("ALTER TABLE guests ADD COLUMN assigned_gre TEXT;"))
         except Exception:
             pass 
         s.commit()
@@ -98,7 +101,6 @@ def main():
         # Initialize Cookie Manager
         cookie_manager = stx.CookieManager()
         
-        # Check if they already have a valid cookie from a previous day
         saved_user = cookie_manager.get(cookie="admin_user")
         if saved_user and not st.session_state.logged_in:
             st.session_state.logged_in = True
@@ -110,7 +112,6 @@ def main():
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
             
-            # The new checkbox
             remember_me = st.checkbox("Keep me logged in for 30 days")
             
             if st.button("Login"):
@@ -120,7 +121,6 @@ def main():
                     st.session_state.logged_in = True
                     st.session_state.user = username
                     
-                    # Set the cookie if they checked the box
                     if remember_me:
                         cookie_manager.set("admin_user", username, expires_at=datetime.datetime.now() + datetime.timedelta(days=30))
                     st.rerun()
@@ -133,12 +133,11 @@ def main():
             if st.button("Logout"):
                 st.session_state.logged_in = False
                 st.session_state.user = ""
-                cookie_manager.delete("admin_user") # Destroy the cookie on logout
+                cookie_manager.delete("admin_user")
                 st.rerun()
 
             st.divider()
 
-            # --- FETCH DATA ---
             view_mode = st.radio("Display Mode:", ["Only your guests", "All guests"], horizontal=True)
 
             if view_mode == "Only your guests":
@@ -174,38 +173,31 @@ def main():
                 # --- MOBILE UPGRADE 2: SMART SEARCH & EXPANDABLE CARDS ---
                 st.subheader("📱 Guest Roster")
                 
-                # The New Smart Search Bar
                 guest_names = df['name'].tolist()
                 searched_guest = st.selectbox("🔍 Search to auto-open a guest's card:", ["-- View All --"] + guest_names)
 
                 st.markdown("*Tap any card below to expand manually:*")
                 
                 for _, guest in df.iterrows():
-                    # Handle blank arrival times gracefully
                     arr_str = guest['arrival_time'] if pd.notna(guest['arrival_time']) else "Time TBD"
-                    
-                    # Check if this is the searched guest
                     is_expanded = (searched_guest == guest['name'])
                     
-                    # INJECT INVISIBLE ANCHOR TARGET
                     st.markdown(f"<div id='guest-{guest['id']}'></div>", unsafe_allow_html=True)
                     
-                    # Create the expandable card
                     with st.expander(f"👤 {guest['name']} | Arr: {arr_str}", expanded=is_expanded):
                         st.write(f"**Assigned Admin:** {guest['admin_owner']}")
                         st.write(f"**Departure:** {guest['departure_time'] if pd.notna(guest['departure_time']) else 'TBD'}")
                         
-                        # --- DISPLAY POC AND GRE ---
+                        # --- DISPLAY POC AND GRE NAME ---
                         display_poc = guest['poc'] if 'poc' in guest and pd.notna(guest['poc']) else 'None'
-                        display_gre = guest['assigned_gre_id'] if pd.notna(guest['assigned_gre_id']) else 'Unassigned'
+                        display_gre = guest['assigned_gre'] if 'assigned_gre' in guest and pd.notna(guest['assigned_gre']) else 'Unassigned'
                         
                         st.write(f"**POC:** {display_poc}")
-                        st.write(f"**Assigned GRE (ID):** {display_gre}")
+                        st.write(f"**Assigned GRE:** {display_gre}")
                         
                         st.markdown("**Quick Actions:**")
                         c1, c2 = st.columns(2)
                         
-                        # One-Tap Toggle: Room Cleaned
                         with c1:
                             room_val = bool(guest['room_cleaned'])
                             new_room = st.toggle("Room Cleaned", value=room_val, key=f"rm_{guest['id']}")
@@ -216,7 +208,6 @@ def main():
                                     s.commit()
                                 st.rerun() 
 
-                        # One-Tap Toggle: Airport Pickup
                         with c2:
                             pickup_val = bool(guest['airport_pickup_sent'])
                             new_pickup = st.toggle("Pickup Sent", value=pickup_val, key=f"pk_{guest['id']}")
@@ -227,7 +218,6 @@ def main():
                                     s.commit()
                                 st.rerun() 
 
-                    # --- TRIGGER AUTO-SCROLL JAVASCRIPT ---
                     if is_expanded:
                         components.html(
                             f"""
@@ -241,11 +231,15 @@ def main():
                             height=0
                         )
 
-                # --- MANAGE GUEST ITINERARIES ---
+                # --- MANAGE GUEST DETAILS & ASSIGNMENTS ---
                 st.divider()
-                st.subheader("📅 Manage Guest Itineraries")
+                st.subheader("📅 Manage Guest Details")
                 
-                selected_guest_itin = st.selectbox("Select a Guest to Assign Times:", ["-- Select Guest --"] + guest_names, key="itin_select")
+                # Fetch available GREs for the dropdown
+                gre_df = conn.query("SELECT gre_name FROM gres", ttl=0)
+                available_gres = gre_df['gre_name'].tolist() if not gre_df.empty else []
+
+                selected_guest_itin = st.selectbox("Select a Guest to Update:", ["-- Select Guest --"] + guest_names, key="itin_select")
                 
                 if selected_guest_itin != "-- Select Guest --":
                     with st.form("update_times_form"):
@@ -258,18 +252,22 @@ def main():
                             st.write("**Departure**")
                             dep_date = st.date_input("Departure Date", format="DD/MM/YYYY")
                             dep_time = st.time_input("Departure Time")
+                        
+                        st.write("**Staff Assignment**")
+                        assign_gre = st.selectbox("Assign GRE to Guest:", ["-- Unassigned --"] + available_gres)
                             
-                        if st.form_submit_button("Save Itinerary"):
+                        if st.form_submit_button("Save Details"):
                             f_arr = f"{arr_date.strftime('%d/%m/%Y')} {arr_time.strftime('%H:%M')}"
                             f_dep = f"{dep_date.strftime('%d/%m/%Y')} {dep_time.strftime('%H:%M')}"
+                            final_gre = None if assign_gre == "-- Unassigned --" else assign_gre
                             
                             with conn.session as s:
                                 s.execute(
-                                    text("UPDATE guests SET arrival_time = :a, departure_time = :d WHERE name = :n"),
-                                    {"a": f_arr, "d": f_dep, "n": selected_guest_itin}
+                                    text("UPDATE guests SET arrival_time = :a, departure_time = :d, assigned_gre = :gre WHERE name = :n"),
+                                    {"a": f_arr, "d": f_dep, "gre": final_gre, "n": selected_guest_itin}
                                 )
                                 s.commit()
-                            st.success(f"Successfully saved itinerary for {selected_guest_itin}!")
+                            st.success(f"Successfully saved details for {selected_guest_itin}!")
                             st.rerun()
             else:
                 st.info("No guests found in this view.")
@@ -306,20 +304,16 @@ def main():
                 if st.button("Execute Import"):
                     with conn.session as s:
                         for _, r in data.iterrows():
-                            # Clean up strings to prevent whitespace issues causing duplicates
                             g_name = str(r['name']).strip()
                             a_user = str(r['admin_username']).strip()
                             poc_name = str(r['poc']).strip() if 'poc' in r and pd.notna(r['poc']) else "Not Provided"
                             
-                            # Auto-create Admin with default password 'password123'
                             s.execute(text("INSERT INTO admins (username, password) VALUES (:u, :p) ON CONFLICT DO NOTHING"),
                                       {"u": a_user, "p": "password123"})
                             
-                            # Check if this guest already exists in the database
                             existing = s.execute(text("SELECT id FROM guests WHERE name = :n AND admin_owner = :u"), 
                                                  {"n": g_name, "u": a_user}).fetchone()
                             
-                            # Only insert if they DO NOT exist yet
                             if not existing:
                                 s.execute(text("INSERT INTO guests (name, admin_owner, poc) VALUES (:n, :u, :poc)"),
                                           {"n": g_name, "u": a_user, "poc": poc_name})
