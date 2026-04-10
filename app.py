@@ -46,6 +46,38 @@ def init_db():
             except Exception:
                 s.rollback() 
 
+
+# --- DDP MODAL UI ---
+@st.dialog("DDP - Dignitary Details Page", width="large")
+def ddp_dialog(guest_data):
+    st.subheader(f"Dignitary: {guest_data['name']}")
+    
+    info_c1, info_c2, info_c3 = st.columns(3)
+    
+    with info_c1:
+        st.markdown("### 🪪 Profile")
+        st.write(f"**Category:** {guest_data['category']}")
+        st.write(f"**Speaker Status:** {guest_data['speaker_category']}")
+        pax_val = int(guest_data['accompanying_persons']) if pd.notna(guest_data['accompanying_persons']) else 0
+        st.write(f"**Accompanying Pax:** {pax_val}")
+        st.write(f"**POC Name:** {guest_data['poc']}")
+
+    with info_c2:
+        st.markdown("### ✈️ Logistics")
+        st.write(f"**Arrival:** {guest_data['arrival_time'] if pd.notna(guest_data['arrival_time']) else 'TBD'}")
+        st.write(f"**Departure:** {guest_data['departure_time'] if pd.notna(guest_data['departure_time']) else 'TBD'}")
+        st.write(f"**Admin Owner:** {guest_data['admin_owner']}")
+        st.write(f"**Assigned GRE:** {guest_data['assigned_gre'] if pd.notna(guest_data['assigned_gre']) else 'Unassigned'}")
+    
+    with info_c3:
+        st.markdown("### 🛎️ Ground Status")
+        room_status = "✅ Clean" if guest_data['room_cleaned'] else "❌ Dirty/Pending"
+        st.write(f"**Room Status:** {room_status}")
+        pickup_status = "🚗 Sent" if guest_data['airport_pickup_sent'] else "⏳ Pending"
+        st.write(f"**Airport Pickup:** {pickup_status}")
+        
+    st.divider()
+    st.info("Additional guest information modules can be added here as we expand the database.")
 # --- APP UI ---
 def main():
     st.set_page_config(page_title="Dignitary Management System", layout="wide")
@@ -105,6 +137,7 @@ def main():
                     st.success("Status updated successfully!")
                     st.rerun()
 
+   
     # --- 3. ADMIN PORTAL ---
     elif mode == "Admin Portal":
         cookie_manager = stx.CookieManager()
