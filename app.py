@@ -203,8 +203,9 @@ def main():
             
             with f_col3:
                 today = datetime.date.today()
-                # Default to today, format restricted to DD/MM
-                date_range = st.date_input("📅 Arrival Date Range (DD/MM)", value=(today, today), format="DD/MM")
+                # Streamlit requires a year in the format parameter, so we use DD/MM/YYYY 
+                # but label it clearly. The backend logic still safely ignores the year.
+                date_range = st.date_input("📅 Arrival Date Range", value=(today, today), format="DD/MM/YYYY")
 
             # --- APPLY FILTERS LOGIC ---
             filtered_df = raw_df.copy()
