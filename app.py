@@ -78,6 +78,39 @@ def ddp_dialog(guest_data):
         
     st.divider()
     st.info("Additional guest information modules can be added here as we expand the database.")
+
+# --- DDP MODAL UI ---
+@st.dialog("DDP - Dignitary Details Page", width="large")
+def ddp_dialog(guest_data):
+    st.subheader(f"Dignitary: {guest_data['name']}")
+    
+    info_c1, info_c2, info_c3 = st.columns(3)
+    
+    with info_c1:
+        st.markdown("### 🪪 Profile")
+        st.write(f"**Category:** {guest_data['category']}")
+        st.write(f"**Speaker Status:** {guest_data['speaker_category']}")
+        pax_val = int(guest_data['accompanying_persons']) if pd.notna(guest_data['accompanying_persons']) else 0
+        st.write(f"**Accompanying Pax:** {pax_val}")
+        st.write(f"**POC Name:** {guest_data['poc']}")
+
+    with info_c2:
+        st.markdown("### ✈️ Logistics")
+        st.write(f"**Arrival:** {guest_data['arrival_time'] if pd.notna(guest_data['arrival_time']) else 'TBD'}")
+        st.write(f"**Departure:** {guest_data['departure_time'] if pd.notna(guest_data['departure_time']) else 'TBD'}")
+        st.write(f"**Admin Owner:** {guest_data['admin_owner']}")
+        st.write(f"**Assigned GRE:** {guest_data['assigned_gre'] if pd.notna(guest_data['assigned_gre']) else 'Unassigned'}")
+    
+    with info_c3:
+        st.markdown("### 🛎️ Ground Status")
+        room_status = "✅ Clean" if guest_data['room_cleaned'] else "❌ Dirty/Pending"
+        st.write(f"**Room Status:** {room_status}")
+        pickup_status = "🚗 Sent" if guest_data['airport_pickup_sent'] else "⏳ Pending"
+        st.write(f"**Airport Pickup:** {pickup_status}")
+        
+    st.divider()
+    st.info("Additional guest information modules can be added here as we expand the database.")
+
 # --- APP UI ---
 def main():
     st.set_page_config(page_title="Dignitary Management System", layout="wide")
@@ -189,6 +222,9 @@ def main():
             if not raw_df.empty:
                 raw_df['arrival_dt'] = pd.to_datetime(raw_df['arrival_time'], format='%d/%m/%Y %H:%M', errors='coerce')
 
+            # ==========================================
+            # VIEW 1: SEARCH DASHBOARD & TODAY'S DASHBOARD
+            # ==========================================
             st.title("🔍 Comprehensive Guest Search")
             
             # --- FILTERING UI ---
@@ -203,9 +239,8 @@ def main():
             
             with f_col3:
                 today = datetime.date.today()
-                # Streamlit requires a year in the format parameter, so we use DD/MM/YYYY 
-                # but label it clearly. The backend logic still safely ignores the year.
-                date_range = st.date_input("📅 Arrival Date Range", value=(today, today), format="DD/MM/YYYY")
+                # Default to today
+                date_range = st.date_input("📅 Arrival Date Range (Ignore Year)", value=(today, today), format="DD/MM/YYYY")
 
             # --- APPLY FILTERS LOGIC ---
             filtered_df = raw_df.copy()
@@ -218,7 +253,6 @@ def main():
                     filtered_df = filtered_df[filtered_df['category'].isin(selected_cats)]
                 
                 if isinstance(date_range, tuple) and len(date_range) == 2:
-                    # Ignore year entirely by mapping everything to a dummy leap year (2024)
                     def to_dummy_year(dt):
                         if pd.isna(dt): return pd.NaT
                         month, day = int(dt.month), int(dt.day)
@@ -234,27 +268,47 @@ def main():
 
                 st.divider()
 
-                # --- SEARCH METRICS ---
-                total_res = len(filtered_df)
-                total_speakers = len(filtered_df[filtered_df['speaker_category'] == 'Speaker'])
-                
-                m_col1, m_col2 = st.columns(2)
-                m_col1.metric("Total Search Results", total_res)
-                m_col2.metric("Total Speakers", total_speakers)
+                # --- SMART VIEW LOGIC: TODAY'S DASHBOARD VS SEARCH ---
+                # Check if filters are at their default (Empty name, no categories, range is just Today)
+                is_default = (not search_name) and (not selected_cats) and (date_range == (today, today))
 
-                if total_res > 0:
-                    cat_counts = filtered_df['category'].dropna().value_counts()
-                    if not cat_counts.empty:
-                        st.markdown("**Category Breakdown:**")
-                        # Dynamically create columns for whatever categories exist in the results
-                        cat_cols = st.columns(len(cat_counts))
-                        for i, (cat_name, count) in enumerate(cat_counts.items()):
-                            cat_cols[i].metric(cat_name, count)
+                if is_default:
+                    st.subheader("📅 Today's Operations Dashboard")
+                    # Display only today's arrivals
+                    display_df = raw_df[raw_df['arrival_dt'].dt.date == today] if not raw_df.empty else pd.DataFrame()
+                    
+                    total_today = len(display_df)
+                    pending_pickups = len(display_df[display_df['airport_pickup_sent'] == 0]) if total_today > 0 else 0
+                    dirty_rooms = len(display_df[display_df['room_cleaned'] == 0]) if total_today > 0 else 0
+                    
+                    m_col1, m_col2, m_col3 = st.columns(3)
+                    m_col1.metric("Today's Total Arrivals", total_today)
+                    m_col2.metric("Pending Pickups (Today)", pending_pickups)
+                    m_col3.metric("Dirty Rooms (Today)", dirty_rooms)
+                
+                else:
+                    st.subheader("📊 Search Results Metrics")
+                    display_df = filtered_df
+                    
+                    total_res = len(display_df)
+                    total_speakers = len(display_df[display_df['speaker_category'] == 'Speaker']) if 'speaker_category' in display_df.columns else 0
+                    
+                    m_col1, m_col2 = st.columns(2)
+                    m_col1.metric("Total Search Results", total_res)
+                    m_col2.metric("Total Speakers", total_speakers)
+
+                    if total_res > 0:
+                        cat_counts = display_df['category'].dropna().value_counts()
+                        if not cat_counts.empty:
+                            st.markdown("**Category Breakdown:**")
+                            cat_cols = st.columns(len(cat_counts))
+                            for i, (cat_name, count) in enumerate(cat_counts.items()):
+                                cat_cols[i].metric(cat_name, count)
 
                 st.divider()
 
-                # --- SEARCH RESULTS TABLE (INTERACTIVE) ---
-                if not filtered_df.empty:
+                # --- SEARCH RESULTS TABLE ---
+                if not display_df.empty:
                     h_col1, h_col2, h_col3, h_col4, h_col5 = st.columns([3, 2, 2, 2, 1.5])
                     h_col1.markdown("**Guest Name**")
                     h_col2.markdown("**GRE Name**")
@@ -263,11 +317,10 @@ def main():
                     h_col5.markdown("**Pax**")
                     st.divider()
 
-                    for _, row in filtered_df.iterrows():
+                    for _, row in display_df.iterrows():
                         r_col1, r_col2, r_col3, r_col4, r_col5 = st.columns([3, 2, 2, 2, 1.5])
                         
                         with r_col1:
-                            # Triggers the instant popup Modal
                             if st.button(f"👤 {row['name']}", key=f"btn_{row['id']}", use_container_width=True):
                                 ddp_dialog(row)
                         
@@ -277,10 +330,12 @@ def main():
                         pax_val = int(row['accompanying_persons']) if pd.notna(row['accompanying_persons']) else 0
                         r_col5.write(f"+ {pax_val}")
                 else:
-                    st.warning("No guests match your exact filter criteria.")
+                    if is_default:
+                        st.success("No guests arriving today. All clear!")
+                    else:
+                        st.warning("No guests match your exact filter criteria.")
             else:
                 st.info("The database is currently empty. Please import guests below.")
-
             # --- ADD NEW GRE ACCOUNT ---
             st.divider()
             st.subheader("Add New GRE (Staff) Account")
