@@ -47,6 +47,48 @@ def init_db():
                 s.rollback() 
 
 
+# --- MASTER EDIT DIALOG ---
+@st.dialog("Edit Guest Information", width="medium")
+def edit_guest_dialog(guest_data):
+    with st.form("edit_form"):
+        st.subheader(f"Updating: {guest_data['name']}")
+        
+        new_name = st.text_input("Guest Name", value=guest_data['name'])
+        new_cat = st.text_input("Category", value=guest_data['category'] if pd.notna(guest_data['category']) else "")
+        new_spk = st.selectbox("Speaker Status", ["Speaker", "Non-Speaker"], 
+                               index=0 if guest_data['speaker_category'] == "Speaker" else 1)
+        new_pax = st.number_input("Accompanying Persons", min_value=0, value=int(guest_data['accompanying_persons']) if pd.notna(guest_data['accompanying_persons']) else 0)
+        new_poc = st.text_input("POC Name", value=guest_data['poc'] if pd.notna(guest_data['poc']) else "")
+        
+        st.divider()
+        st.write("✈️ Logistics")
+        new_arr = st.text_input("Arrival (DD/MM/YYYY HH:MM)", value=guest_data['arrival_time'] if pd.notna(guest_data['arrival_time']) else "")
+        new_dep = st.text_input("Departure (DD/MM/YYYY HH:MM)", value=guest_data['departure_time'] if pd.notna(guest_data['departure_time']) else "")
+        
+        # Fetch GREs for the dropdown
+        gre_df = conn.query("SELECT gre_name FROM gres", ttl=0)
+        available_gres = ["-- Unassigned --"] + gre_df['gre_name'].tolist() if not gre_df.empty else ["-- Unassigned --"]
+        current_gre = guest_data['assigned_gre'] if pd.notna(guest_data['assigned_gre']) else "-- Unassigned --"
+        new_gre = st.selectbox("Assign GRE", available_gres, index=available_gres.index(current_gre) if current_gre in available_gres else 0)
+
+        if st.form_submit_button("Save All Changes"):
+            with conn.session as s:
+                s.execute(text("""
+                    UPDATE guests SET 
+                    name = :n, category = :cat, speaker_category = :spk, 
+                    accompanying_persons = :pax, poc = :poc, arrival_time = :arr, 
+                    departure_time = :dep, assigned_gre = :gre
+                    WHERE id = :id
+                """), {
+                    "n": new_name, "cat": new_cat, "spk": new_spk, "pax": new_pax, 
+                    "poc": new_poc, "arr": new_arr, "dep": new_dep, 
+                    "gre": None if new_gre == "-- Unassigned --" else new_gre,
+                    "id": guest_data['id']
+                })
+                s.commit()
+            st.success("Information updated!")
+            st.rerun()
+
 # --- DDP MODAL UI ---
 @st.dialog("DDP - Dignitary Details Page", width="large")
 def ddp_dialog(guest_data):
@@ -80,10 +122,15 @@ def ddp_dialog(guest_data):
     st.info("Additional guest information modules can be added here as we expand the database.")
 
 # --- DDP MODAL UI ---
+# --- DDP MODAL UI ---
 @st.dialog("DDP - Dignitary Details Page", width="large")
 def ddp_dialog(guest_data):
-    st.subheader(f"Dignitary: {guest_data['name']}")
-    
+    # Top Row: Title and Edit Button
+    header_col, edit_col = st.columns([5, 1])
+    header_col.subheader(f"Dignitary: {guest_data['name']}")
+    if edit_col.button("📝 Edit Profile"):
+        edit_guest_dialog(guest_data)
+
     info_c1, info_c2, info_c3 = st.columns(3)
     
     with info_c1:
@@ -103,13 +150,25 @@ def ddp_dialog(guest_data):
     
     with info_c3:
         st.markdown("### 🛎️ Ground Status")
-        room_status = "✅ Clean" if guest_data['room_cleaned'] else "❌ Dirty/Pending"
-        st.write(f"**Room Status:** {room_status}")
-        pickup_status = "🚗 Sent" if guest_data['airport_pickup_sent'] else "⏳ Pending"
-        st.write(f"**Airport Pickup:** {pickup_status}")
+        # --- QUICK TOGGLES FOR STATUS ---
+        room_val = bool(guest_data['room_cleaned'])
+        new_room = st.toggle("Room Cleaned", value=room_val, key=f"ddp_rm_{guest_data['id']}")
+        if new_room != room_val:
+            with conn.session as s:
+                s.execute(text("UPDATE guests SET room_cleaned = :r WHERE id = :id"), {"r": int(new_room), "id": guest_data['id']})
+                s.commit()
+            st.rerun()
+
+        pickup_val = bool(guest_data['airport_pickup_sent'])
+        new_pickup = st.toggle("Pickup Sent", value=pickup_val, key=f"ddp_pk_{guest_data['id']}")
+        if new_pickup != pickup_val:
+            with conn.session as s:
+                s.execute(text("UPDATE guests SET airport_pickup_sent = :p WHERE id = :id"), {"p": int(new_pickup), "id": guest_data['id']})
+                s.commit()
+            st.rerun()
         
     st.divider()
-    st.info("Additional guest information modules can be added here as we expand the database.")
+    st.info("To change core profile data, click the 'Edit Profile' button at the top.")
 
 # --- APP UI ---
 def main():
