@@ -3,7 +3,6 @@ import pandas as pd
 from sqlalchemy import text
 import extra_streamlit_components as stx
 import datetime
-import streamlit.components.v1 as components
 
 # --- INITIALIZE BUILT-IN SQL CONNECTION ---
 conn = st.connection("postgresql", type="sql")
@@ -24,20 +23,20 @@ def init_db():
                 stay_location TEXT,
                 room_cleaned INTEGER DEFAULT 0,
                 assigned_gre TEXT,
-                poc TEXT
+                poc TEXT,
+                category TEXT,
+                speaker_category TEXT,
+                accompanying_persons INTEGER DEFAULT 0
             );
         '''))
-        # Safely adds new columns to your existing table without wiping your data
+        # Safely add columns if they don't exist
+        for col in ['departure_time', 'poc', 'assigned_gre', 'category', 'speaker_category']:
+            try:
+                s.execute(text(f"ALTER TABLE guests ADD COLUMN {col} TEXT;"))
+            except Exception:
+                pass 
         try:
-            s.execute(text("ALTER TABLE guests ADD COLUMN departure_time TEXT;"))
-        except Exception:
-            pass 
-        try:
-            s.execute(text("ALTER TABLE guests ADD COLUMN poc TEXT;"))
-        except Exception:
-            pass 
-        try:
-            s.execute(text("ALTER TABLE guests ADD COLUMN assigned_gre TEXT;"))
+            s.execute(text("ALTER TABLE guests ADD COLUMN accompanying_persons INTEGER DEFAULT 0;"))
         except Exception:
             pass 
         s.commit()
@@ -47,9 +46,15 @@ def main():
     st.set_page_config(page_title="Dignitary Management System", layout="wide")
     init_db()
 
+    # --- SESSION STATE INITIALIZATION ---
     if "logged_in" not in st.session_state: 
         st.session_state.logged_in = False
         st.session_state.user = ""
+    # Manage Admin UI State (Search vs DDP)
+    if "admin_view" not in st.session_state:
+        st.session_state.admin_view = "search" 
+    if "selected_guest_id" not in st.session_state:
+        st.session_state.selected_guest_id = None
 
     st.sidebar.title("🛂 Event Control")
     mode = st.sidebar.radio("Navigate to:", ["Public Search", "Staff Portal (GRE)", "Admin Portal"])
@@ -76,7 +81,7 @@ def main():
                 st.success(f"Access Granted. Welcome, {gre_name}!")
                 st.session_state.gre_user = gre_name
             else:
-                st.error("GRE account not found. Please contact an Admin to create your account.")
+                st.error("GRE account not found.")
                 
         if st.session_state.get("gre_user"):
             st.divider()
@@ -98,10 +103,9 @@ def main():
 
     # --- 3. ADMIN PORTAL ---
     elif mode == "Admin Portal":
-        # Initialize Cookie Manager
         cookie_manager = stx.CookieManager()
-        
         saved_user = cookie_manager.get(cookie="admin_user")
+        
         if saved_user and not st.session_state.logged_in:
             st.session_state.logged_in = True
             st.session_state.user = saved_user
@@ -111,7 +115,6 @@ def main():
             st.title("🔐 Admin Login")
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
-            
             remember_me = st.checkbox("Keep me logged in for 30 days")
             
             if st.button("Login"):
@@ -120,206 +123,146 @@ def main():
                 if not admin_check.empty:
                     st.session_state.logged_in = True
                     st.session_state.user = username
-                    
                     if remember_me:
                         cookie_manager.set("admin_user", username, expires_at=datetime.datetime.now() + datetime.timedelta(days=30))
                     st.rerun()
                 else:
                     st.error("Invalid username or password.")
                     
-        # --- ADMIN DASHBOARD ---
+        # --- ADMIN AUTHORIZED AREA ---
         if st.session_state.logged_in:
-            st.success(f"Welcome, {st.session_state.user}!")
-            if st.button("Logout"):
+            colA, colB = st.columns([8, 1])
+            colA.success(f"Welcome, {st.session_state.user}!")
+            if colB.button("Logout"):
                 st.session_state.logged_in = False
                 st.session_state.user = ""
+                st.session_state.admin_view = "search"
                 cookie_manager.delete("admin_user")
                 st.rerun()
 
             st.divider()
 
-            view_mode = st.radio("Display Mode:", ["Only your guests", "All guests"], horizontal=True)
+            # Fetch all guests into memory for Pandas filtering
+            raw_df = conn.query("SELECT * FROM guests", ttl=0)
+            if raw_df.empty:
+                st.info("No guests in the database. Please import data.")
+                st.stop()
 
-            if view_mode == "Only your guests":
-                df = conn.query("SELECT * FROM guests WHERE admin_owner = :u", params={"u": st.session_state.user}, ttl=0)
-            else:
-                df = conn.query("SELECT * FROM guests", ttl=0)
+            # Prep Dates for Filtering
+            raw_df['arrival_dt'] = pd.to_datetime(raw_df['arrival_time'], format='%d/%m/%Y %H:%M', errors='coerce')
 
-            if not df.empty:
-                df['arrival_dt'] = pd.to_datetime(df['arrival_time'], format='%d/%m/%Y %H:%M', errors='coerce')
-                df = df.sort_values(by='arrival_dt', ascending=True, na_position='last')
+            # ==========================================
+            # VIEW 1: SEARCH DASHBOARD
+            # ==========================================
+            if st.session_state.admin_view == "search":
+                st.title("🔍 Comprehensive Guest Search")
+                
+                # --- FILTERING UI ---
+                f_col1, f_col2, f_col3 = st.columns([2, 2, 2])
+                
+                with f_col1:
+                    search_name = st.text_input("👤 Search by Guest Name", placeholder="Type a name...")
+                
+                with f_col2:
+                    # Dynamically get categories from DB, handle empties
+                    available_cats = [c for c in raw_df['category'].unique() if pd.notna(c)]
+                    selected_cats = st.multiselect("🏷️ Filter by Category", available_cats, placeholder="Select categories...")
+                
+                with f_col3:
+                    today = datetime.date.today()
+                    # Default range: Today to +7 days
+                    date_range = st.date_input("📅 Arrival Date Range", value=(today, today + datetime.timedelta(days=7)))
 
-                # --- MOBILE UPGRADE 1: METRICS AT THE TOP ---
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Total Guests", len(df))
-                m2.metric("Pickups Pending", len(df[df['airport_pickup_sent'] == 0]))
-                m3.metric("Rooms Unclean", len(df[df['room_cleaned'] == 0]))
-                st.divider()
+                # --- APPLY FILTERS LOGIC ---
+                filtered_df = raw_df.copy()
+                
+                if search_name:
+                    filtered_df = filtered_df[filtered_df['name'].str.contains(search_name, case=False, na=False)]
+                
+                if selected_cats:
+                    filtered_df = filtered_df[filtered_df['category'].isin(selected_cats)]
+                
+                if isinstance(date_range, tuple) and len(date_range) == 2:
+                    start_date, end_date = date_range
+                    # Keep rows where arrival_dt is within range, OR arrival_dt is NaT (unknown)
+                    mask = (filtered_df['arrival_dt'].dt.date >= start_date) & (filtered_df['arrival_dt'].dt.date <= end_date)
+                    filtered_df = filtered_df[mask | filtered_df['arrival_dt'].isna()]
 
-                # --- TODAY'S ARRIVAL ALERTS ---
-                today = pd.Timestamp.now().date()
-                today_guests = df[df['arrival_dt'].dt.date == today]
+                st.markdown(f"**Showing {len(filtered_df)} Results**")
 
-                if not today_guests.empty:
-                    st.subheader("🚨 Today's Arrivals")
-                    for _, guest in today_guests.iterrows():
-                        arr_time = guest['arrival_dt'].strftime('%H:%M') if pd.notnull(guest['arrival_dt']) else "Unknown Time"
-                        if guest['room_cleaned'] == 0:
-                            st.error(f"⚠️ **{guest['name']}** arrives at {arr_time}. **Room NOT clean!**")
-                        else:
-                            st.success(f"✅ **{guest['name']}** arrives at {arr_time}. Room is clean.")
+                # --- SEARCH RESULTS TABLE (INTERACTIVE) ---
+                if not filtered_df.empty:
+                    # Table Headers
+                    h_col1, h_col2, h_col3, h_col4, h_col5 = st.columns([3, 2, 2, 2, 1.5])
+                    h_col1.markdown("**Guest Name**")
+                    h_col2.markdown("**GRE Name**")
+                    h_col3.markdown("**POC Name**")
+                    h_col4.markdown("**Date of Arrival**")
+                    h_col5.markdown("**Pax**")
                     st.divider()
 
-                # --- MOBILE UPGRADE 2: SMART SEARCH & EXPANDABLE CARDS ---
-                st.subheader("📱 Guest Roster")
-                
-                guest_names = df['name'].tolist()
-                searched_guest = st.selectbox("🔍 Search to auto-open a guest's card:", ["-- View All --"] + guest_names)
-
-                st.markdown("*Tap any card below to expand manually:*")
-                
-                for _, guest in df.iterrows():
-                    arr_str = guest['arrival_time'] if pd.notna(guest['arrival_time']) else "Time TBD"
-                    is_expanded = (searched_guest == guest['name'])
-                    
-                    st.markdown(f"<div id='guest-{guest['id']}'></div>", unsafe_allow_html=True)
-                    
-                    with st.expander(f"👤 {guest['name']} | Arr: {arr_str}", expanded=is_expanded):
-                        st.write(f"**Assigned Admin:** {guest['admin_owner']}")
-                        st.write(f"**Departure:** {guest['departure_time'] if pd.notna(guest['departure_time']) else 'TBD'}")
+                    # Render rows as interactive buttons
+                    for _, row in filtered_df.iterrows():
+                        r_col1, r_col2, r_col3, r_col4, r_col5 = st.columns([3, 2, 2, 2, 1.5])
                         
-                        # --- DISPLAY POC AND GRE NAME ---
-                        display_poc = guest['poc'] if 'poc' in guest and pd.notna(guest['poc']) else 'None'
-                        display_gre = guest['assigned_gre'] if 'assigned_gre' in guest and pd.notna(guest['assigned_gre']) else 'Unassigned'
+                        with r_col1:
+                            # Clicking this button changes the state to DDP
+                            if st.button(f"👤 {row['name']}", key=f"btn_{row['id']}", use_container_width=True):
+                                st.session_state.selected_guest_id = row['id']
+                                st.session_state.admin_view = "ddp"
+                                st.rerun()
                         
-                        st.write(f"**POC:** {display_poc}")
-                        st.write(f"**Assigned GRE:** {display_gre}")
-                        
-                        st.markdown("**Quick Actions:**")
-                        c1, c2 = st.columns(2)
-                        
-                        with c1:
-                            room_val = bool(guest['room_cleaned'])
-                            new_room = st.toggle("Room Cleaned", value=room_val, key=f"rm_{guest['id']}")
-                            if new_room != room_val:
-                                with conn.session as s:
-                                    s.execute(text("UPDATE guests SET room_cleaned = :r WHERE id = :id"), 
-                                              {"r": int(new_room), "id": guest['id']})
-                                    s.commit()
-                                st.rerun() 
+                        r_col2.write(row['assigned_gre'] if pd.notna(row['assigned_gre']) else "--")
+                        r_col3.write(row['poc'] if pd.notna(row['poc']) else "--")
+                        r_col4.write(row['arrival_time'] if pd.notna(row['arrival_time']) else "TBD")
+                        r_col5.write(f"+ {row['accompanying_persons']}")
+                else:
+                    st.warning("No guests match your exact filter criteria.")
 
-                        with c2:
-                            pickup_val = bool(guest['airport_pickup_sent'])
-                            new_pickup = st.toggle("Pickup Sent", value=pickup_val, key=f"pk_{guest['id']}")
-                            if new_pickup != pickup_val:
-                                with conn.session as s:
-                                    s.execute(text("UPDATE guests SET airport_pickup_sent = :p WHERE id = :id"), 
-                                              {"p": int(new_pickup), "id": guest['id']})
-                                    s.commit()
-                                st.rerun() 
+            # ==========================================
+            # VIEW 2: DDP - DIGNITARY DETAILS PAGE
+            # ==========================================
+            elif st.session_state.admin_view == "ddp":
+                # Get the specific guest data
+                guest_data = raw_df[raw_df['id'] == st.session_state.selected_guest_id].iloc[0]
 
-                    if is_expanded:
-                        components.html(
-                            f"""
-                            <script>
-                                var element = window.parent.document.getElementById('guest-{guest['id']}');
-                                if (element) {{
-                                    element.scrollIntoView({{behavior: 'smooth', block: 'center'}});
-                                }}
-                            </script>
-                            """,
-                            height=0
-                        )
-
-                # --- MANAGE GUEST DETAILS & ASSIGNMENTS ---
-                st.divider()
-                st.subheader("📅 Manage Guest Details")
-                
-                # Fetch available GREs for the dropdown
-                gre_df = conn.query("SELECT gre_name FROM gres", ttl=0)
-                available_gres = gre_df['gre_name'].tolist() if not gre_df.empty else []
-
-                selected_guest_itin = st.selectbox("Select a Guest to Update:", ["-- Select Guest --"] + guest_names, key="itin_select")
-                
-                if selected_guest_itin != "-- Select Guest --":
-                    with st.form("update_times_form"):
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write("**Arrival**")
-                            arr_date = st.date_input("Arrival Date", format="DD/MM/YYYY")
-                            arr_time = st.time_input("Arrival Time")
-                        with col2:
-                            st.write("**Departure**")
-                            dep_date = st.date_input("Departure Date", format="DD/MM/YYYY")
-                            dep_time = st.time_input("Departure Time")
-                        
-                        st.write("**Staff Assignment**")
-                        assign_gre = st.selectbox("Assign GRE to Guest:", ["-- Unassigned --"] + available_gres)
-                            
-                        if st.form_submit_button("Save Details"):
-                            f_arr = f"{arr_date.strftime('%d/%m/%Y')} {arr_time.strftime('%H:%M')}"
-                            f_dep = f"{dep_date.strftime('%d/%m/%Y')} {dep_time.strftime('%H:%M')}"
-                            final_gre = None if assign_gre == "-- Unassigned --" else assign_gre
-                            
-                            with conn.session as s:
-                                s.execute(
-                                    text("UPDATE guests SET arrival_time = :a, departure_time = :d, assigned_gre = :gre WHERE name = :n"),
-                                    {"a": f_arr, "d": f_dep, "gre": final_gre, "n": selected_guest_itin}
-                                )
-                                s.commit()
-                            st.success(f"Successfully saved details for {selected_guest_itin}!")
-                            st.rerun()
-            else:
-                st.info("No guests found in this view.")
-
-            # --- ADD NEW GRE ACCOUNT ---
-            st.divider()
-            st.subheader("Add New GRE (Staff) Account")
-            with st.form("add_gre_form"):
-                new_gre_name = st.text_input("GRE Full Name")
-                new_gre_phone = st.text_input("GRE Phone Number")
-                submit_gre = st.form_submit_button("Create GRE Account")
-                
-                if submit_gre:
-                    if new_gre_name.strip():
-                        with conn.session as s:
-                            s.execute(
-                                text("INSERT INTO gres (gre_name, gre_phone) VALUES (:name, :phone)"),
-                                {"name": new_gre_name, "phone": new_gre_phone}
-                            )
-                            s.commit()
-                        st.success(f"Successfully added GRE: {new_gre_name}")
-                        st.rerun() 
-                    else:
-                        st.error("GRE Name cannot be empty.")
-
-            # --- BULK IMPORT (CSV) ---
-            st.divider()
-            st.subheader("Bulk Import (CSV)")
-            st.markdown("Upload a CSV with exactly 3 columns: `name`, `admin_username`, and `poc`")
-            
-            file = st.file_uploader("Upload Guest CSV", type="csv")
-            if file:
-                data = pd.read_csv(file)
-                if st.button("Execute Import"):
-                    with conn.session as s:
-                        for _, r in data.iterrows():
-                            g_name = str(r['name']).strip()
-                            a_user = str(r['admin_username']).strip()
-                            poc_name = str(r['poc']).strip() if 'poc' in r and pd.notna(r['poc']) else "Not Provided"
-                            
-                            s.execute(text("INSERT INTO admins (username, password) VALUES (:u, :p) ON CONFLICT DO NOTHING"),
-                                      {"u": a_user, "p": "password123"})
-                            
-                            existing = s.execute(text("SELECT id FROM guests WHERE name = :n AND admin_owner = :u"), 
-                                                 {"n": g_name, "u": a_user}).fetchone()
-                            
-                            if not existing:
-                                s.execute(text("INSERT INTO guests (name, admin_owner, poc) VALUES (:n, :u, :poc)"),
-                                          {"n": g_name, "u": a_user, "poc": poc_name})
-                        s.commit()
-                    st.success("CSV Processed! New guests added with their POCs.")
+                # Back Button
+                if st.button("⬅️ Back to Search Results"):
+                    st.session_state.admin_view = "search"
                     st.rerun()
+
+                st.title("DDP - Dignitary Details Page")
+                st.subheader(f"Dignitary: {guest_data['name']}")
+                
+                # Layout information beautifully
+                info_c1, info_c2, info_c3 = st.columns(3)
+                
+                with info_c1:
+                    st.markdown("### 🪪 Profile")
+                    st.write(f"**Category:** {guest_data['category']}")
+                    st.write(f"**Speaker Status:** {guest_data['speaker_category']}")
+                    st.write(f"**Accompanying Pax:** {guest_data['accompanying_persons']}")
+                    st.write(f"**POC Name:** {guest_data['poc']}")
+
+                with info_c2:
+                    st.markdown("### ✈️ Logistics")
+                    st.write(f"**Arrival:** {guest_data['arrival_time']}")
+                    st.write(f"**Departure:** {guest_data['departure_time']}")
+                    st.write(f"**Admin Owner:** {guest_data['admin_owner']}")
+                    st.write(f"**Assigned GRE:** {guest_data['assigned_gre']}")
+                
+                with info_c3:
+                    st.markdown("### 🛎️ Ground Status")
+                    
+                    # Quick Status Indicators
+                    room_status = "✅ Clean" if guest_data['room_cleaned'] else "❌ Dirty/Pending"
+                    st.write(f"**Room Status:** {room_status}")
+                    
+                    pickup_status = "🚗 Sent" if guest_data['airport_pickup_sent'] else "⏳ Pending"
+                    st.write(f"**Airport Pickup:** {pickup_status}")
+                    
+                st.divider()
+                st.info("Additional guest information modules can be added here as we expand the database.")
 
 if __name__ == "__main__":
     main()
