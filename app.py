@@ -139,6 +139,7 @@ def main():
 
    
     # --- 3. ADMIN PORTAL ---
+    # --- 3. ADMIN PORTAL ---
     elif mode == "Admin Portal":
         cookie_manager = stx.CookieManager()
         saved_user = cookie_manager.get(cookie="admin_user")
@@ -173,16 +174,13 @@ def main():
             if colB.button("Logout"):
                 st.session_state.logged_in = False
                 st.session_state.user = ""
-                st.session_state.admin_view = "search"
                 cookie_manager.delete("admin_user")
                 st.rerun()
 
             st.divider()
 
-            # Fetch all guests into memory for Pandas filtering
             raw_df = conn.query("SELECT * FROM guests", ttl=0)
             
-            # Defensive Pandas Columns (Prevents UI crashes if DB is empty or catching up)
             expected_columns = ['category', 'speaker_category', 'accompanying_persons', 'poc', 'assigned_gre', 'departure_time']
             for col in expected_columns:
                 if col not in raw_df.columns:
@@ -191,169 +189,153 @@ def main():
             if not raw_df.empty:
                 raw_df['arrival_dt'] = pd.to_datetime(raw_df['arrival_time'], format='%d/%m/%Y %H:%M', errors='coerce')
 
-            # ==========================================
-            # VIEW 1: SEARCH DASHBOARD
-            # ==========================================
-            if st.session_state.admin_view == "search":
-                st.title("🔍 Comprehensive Guest Search")
-                
-                # --- FILTERING UI ---
-                f_col1, f_col2, f_col3 = st.columns([2, 2, 2])
-                
-                with f_col1:
-                    search_name = st.text_input("👤 Search by Guest Name", placeholder="Type a name...")
-                
-                with f_col2:
-                    available_cats = [c for c in raw_df['category'].unique() if pd.notna(c)] if not raw_df.empty else []
-                    selected_cats = st.multiselect("🏷️ Filter by Category", available_cats, placeholder="Select categories...")
-                
-                with f_col3:
-                    today = datetime.date.today()
-                    date_range = st.date_input("📅 Arrival Date Range", value=(today, today + datetime.timedelta(days=7)))
+            st.title("🔍 Comprehensive Guest Search")
+            
+            # --- FILTERING UI ---
+            f_col1, f_col2, f_col3 = st.columns([2, 2, 2])
+            
+            with f_col1:
+                search_name = st.text_input("👤 Search by Guest Name", placeholder="Type a name...")
+            
+            with f_col2:
+                available_cats = [c for c in raw_df['category'].unique() if pd.notna(c)] if not raw_df.empty else []
+                selected_cats = st.multiselect("🏷️ Filter by Category", available_cats, placeholder="Select categories...")
+            
+            with f_col3:
+                today = datetime.date.today()
+                # Default to today, format restricted to DD/MM
+                date_range = st.date_input("📅 Arrival Date Range (DD/MM)", value=(today, today), format="DD/MM")
 
-                # --- APPLY FILTERS LOGIC ---
-                filtered_df = raw_df.copy()
+            # --- APPLY FILTERS LOGIC ---
+            filtered_df = raw_df.copy()
+            
+            if not filtered_df.empty:
+                if search_name:
+                    filtered_df = filtered_df[filtered_df['name'].str.contains(search_name, case=False, na=False)]
                 
+                if selected_cats:
+                    filtered_df = filtered_df[filtered_df['category'].isin(selected_cats)]
+                
+                if isinstance(date_range, tuple) and len(date_range) == 2:
+                    # Ignore year entirely by mapping everything to a dummy leap year (2024)
+                    def to_dummy_year(dt):
+                        if pd.isna(dt): return pd.NaT
+                        month, day = int(dt.month), int(dt.day)
+                        if month == 2 and day == 29: return pd.Timestamp(year=2024, month=2, day=29)
+                        return pd.Timestamp(year=2024, month=month, day=day)
+
+                    dummy_start = pd.Timestamp(year=2024, month=date_range[0].month, day=date_range[0].day)
+                    dummy_end = pd.Timestamp(year=2024, month=date_range[1].month, day=date_range[1].day)
+                    
+                    filtered_df['dummy_date'] = filtered_df['arrival_dt'].apply(to_dummy_year)
+                    mask = (filtered_df['dummy_date'] >= dummy_start) & (filtered_df['dummy_date'] <= dummy_end)
+                    filtered_df = filtered_df[mask | filtered_df['arrival_dt'].isna()]
+
+                st.divider()
+
+                # --- SEARCH METRICS ---
+                total_res = len(filtered_df)
+                total_speakers = len(filtered_df[filtered_df['speaker_category'] == 'Speaker'])
+                
+                m_col1, m_col2 = st.columns(2)
+                m_col1.metric("Total Search Results", total_res)
+                m_col2.metric("Total Speakers", total_speakers)
+
+                if total_res > 0:
+                    cat_counts = filtered_df['category'].dropna().value_counts()
+                    if not cat_counts.empty:
+                        st.markdown("**Category Breakdown:**")
+                        # Dynamically create columns for whatever categories exist in the results
+                        cat_cols = st.columns(len(cat_counts))
+                        for i, (cat_name, count) in enumerate(cat_counts.items()):
+                            cat_cols[i].metric(cat_name, count)
+
+                st.divider()
+
+                # --- SEARCH RESULTS TABLE (INTERACTIVE) ---
                 if not filtered_df.empty:
-                    if search_name:
-                        filtered_df = filtered_df[filtered_df['name'].str.contains(search_name, case=False, na=False)]
-                    
-                    if selected_cats:
-                        filtered_df = filtered_df[filtered_df['category'].isin(selected_cats)]
-                    
-                    if isinstance(date_range, tuple) and len(date_range) == 2:
-                        start_date, end_date = date_range
-                        mask = (filtered_df['arrival_dt'].dt.date >= start_date) & (filtered_df['arrival_dt'].dt.date <= end_date)
-                        filtered_df = filtered_df[mask | filtered_df['arrival_dt'].isna()]
+                    h_col1, h_col2, h_col3, h_col4, h_col5 = st.columns([3, 2, 2, 2, 1.5])
+                    h_col1.markdown("**Guest Name**")
+                    h_col2.markdown("**GRE Name**")
+                    h_col3.markdown("**POC Name**")
+                    h_col4.markdown("**Date of Arrival**")
+                    h_col5.markdown("**Pax**")
+                    st.divider()
 
-                    st.markdown(f"**Showing {len(filtered_df)} Results**")
-
-                    # --- SEARCH RESULTS TABLE (INTERACTIVE) ---
-                    if not filtered_df.empty:
-                        h_col1, h_col2, h_col3, h_col4, h_col5 = st.columns([3, 2, 2, 2, 1.5])
-                        h_col1.markdown("**Guest Name**")
-                        h_col2.markdown("**GRE Name**")
-                        h_col3.markdown("**POC Name**")
-                        h_col4.markdown("**Date of Arrival**")
-                        h_col5.markdown("**Pax**")
-                        st.divider()
-
-                        for _, row in filtered_df.iterrows():
-                            r_col1, r_col2, r_col3, r_col4, r_col5 = st.columns([3, 2, 2, 2, 1.5])
-                            
-                            with r_col1:
-                                if st.button(f"👤 {row['name']}", key=f"btn_{row['id']}", use_container_width=True):
-                                    st.session_state.selected_guest_id = row['id']
-                                    st.session_state.admin_view = "ddp"
-                                    st.rerun()
-                            
-                            r_col2.write(row['assigned_gre'] if pd.notna(row['assigned_gre']) else "--")
-                            r_col3.write(row['poc'] if pd.notna(row['poc']) else "--")
-                            r_col4.write(row['arrival_time'] if pd.notna(row['arrival_time']) else "TBD")
-                            pax_val = int(row['accompanying_persons']) if pd.notna(row['accompanying_persons']) else 0
-                            r_col5.write(f"+ {pax_val}")
-                    else:
-                        st.warning("No guests match your exact filter criteria.")
+                    for _, row in filtered_df.iterrows():
+                        r_col1, r_col2, r_col3, r_col4, r_col5 = st.columns([3, 2, 2, 2, 1.5])
+                        
+                        with r_col1:
+                            # Triggers the instant popup Modal
+                            if st.button(f"👤 {row['name']}", key=f"btn_{row['id']}", use_container_width=True):
+                                ddp_dialog(row)
+                        
+                        r_col2.write(row['assigned_gre'] if pd.notna(row['assigned_gre']) else "--")
+                        r_col3.write(row['poc'] if pd.notna(row['poc']) else "--")
+                        r_col4.write(row['arrival_time'] if pd.notna(row['arrival_time']) else "TBD")
+                        pax_val = int(row['accompanying_persons']) if pd.notna(row['accompanying_persons']) else 0
+                        r_col5.write(f"+ {pax_val}")
                 else:
-                    st.info("The database is currently empty. Please import guests below.")
+                    st.warning("No guests match your exact filter criteria.")
+            else:
+                st.info("The database is currently empty. Please import guests below.")
 
-                # --- ADD NEW GRE ACCOUNT ---
-                st.divider()
-                st.subheader("Add New GRE (Staff) Account")
-                with st.form("add_gre_form"):
-                    new_gre_name = st.text_input("GRE Full Name")
-                    new_gre_phone = st.text_input("GRE Phone Number")
-                    submit_gre = st.form_submit_button("Create GRE Account")
-                    
-                    if submit_gre:
-                        if new_gre_name.strip():
-                            with conn.session as s:
-                                s.execute(
-                                    text("INSERT INTO gres (gre_name, gre_phone) VALUES (:name, :phone)"),
-                                    {"name": new_gre_name, "phone": new_gre_phone}
-                                )
-                                s.commit()
-                            st.success(f"Successfully added GRE: {new_gre_name}")
-                            st.rerun() 
-                        else:
-                            st.error("GRE Name cannot be empty.")
-
-                # --- BULK IMPORT (CSV) ---
-                st.divider()
-                st.subheader("Bulk Import (CSV)")
-                st.markdown("Upload a CSV with exactly 6 columns: `name`, `admin_username`, `poc`, `category`, `speaker_category`, and `accompanying_persons`")
+            # --- ADD NEW GRE ACCOUNT ---
+            st.divider()
+            st.subheader("Add New GRE (Staff) Account")
+            with st.form("add_gre_form"):
+                new_gre_name = st.text_input("GRE Full Name")
+                new_gre_phone = st.text_input("GRE Phone Number")
+                submit_gre = st.form_submit_button("Create GRE Account")
                 
-                file = st.file_uploader("Upload Guest CSV", type="csv")
-                if file:
-                    data = pd.read_csv(file)
-                    if st.button("Execute Import"):
+                if submit_gre:
+                    if new_gre_name.strip():
                         with conn.session as s:
-                            for _, r in data.iterrows():
-                                g_name = str(r['name']).strip()
-                                a_user = str(r['admin_username']).strip()
-                                poc_name = str(r['poc']).strip() if 'poc' in r and pd.notna(r['poc']) else "Not Provided"
-                                cat_name = str(r['category']).strip() if 'category' in r and pd.notna(r['category']) else "Uncategorized"
-                                spk_cat = str(r['speaker_category']).strip() if 'speaker_category' in r and pd.notna(r['speaker_category']) else "Non-Speaker"
-                                
-                                try:
-                                    pax_num = int(r['accompanying_persons']) if 'accompanying_persons' in r and pd.notna(r['accompanying_persons']) else 0
-                                except:
-                                    pax_num = 0
-                                
-                                s.execute(text("INSERT INTO admins (username, password) VALUES (:u, :p) ON CONFLICT DO NOTHING"),
-                                          {"u": a_user, "p": "password123"})
-                                
-                                existing = s.execute(text("SELECT id FROM guests WHERE name = :n AND admin_owner = :u"), 
-                                                     {"n": g_name, "u": a_user}).fetchone()
-                                
-                                if not existing:
-                                    s.execute(text("""INSERT INTO guests 
-                                                      (name, admin_owner, poc, category, speaker_category, accompanying_persons) 
-                                                      VALUES (:n, :u, :poc, :cat, :spk, :pax)"""),
-                                              {"n": g_name, "u": a_user, "poc": poc_name, "cat": cat_name, "spk": spk_cat, "pax": pax_num})
+                            s.execute(
+                                text("INSERT INTO gres (gre_name, gre_phone) VALUES (:name, :phone)"),
+                                {"name": new_gre_name, "phone": new_gre_phone}
+                            )
                             s.commit()
-                        st.success("CSV Processed! New guests added successfully.")
-                        st.rerun()
+                        st.success(f"Successfully added GRE: {new_gre_name}")
+                        st.rerun() 
+                    else:
+                        st.error("GRE Name cannot be empty.")
 
-            # ==========================================
-            # VIEW 2: DDP - DIGNITARY DETAILS PAGE
-            # ==========================================
-            elif st.session_state.admin_view == "ddp":
-                guest_data = raw_df[raw_df['id'] == st.session_state.selected_guest_id].iloc[0]
-
-                if st.button("⬅️ Back to Search Results"):
-                    st.session_state.admin_view = "search"
+            # --- BULK IMPORT (CSV) ---
+            st.divider()
+            st.subheader("Bulk Import (CSV)")
+            st.markdown("Upload a CSV with exactly 6 columns: `name`, `admin_username`, `poc`, `category`, `speaker_category`, and `accompanying_persons`")
+            
+            file = st.file_uploader("Upload Guest CSV", type="csv")
+            if file:
+                data = pd.read_csv(file)
+                if st.button("Execute Import"):
+                    with conn.session as s:
+                        for _, r in data.iterrows():
+                            g_name = str(r['name']).strip()
+                            a_user = str(r['admin_username']).strip()
+                            poc_name = str(r['poc']).strip() if 'poc' in r and pd.notna(r['poc']) else "Not Provided"
+                            cat_name = str(r['category']).strip() if 'category' in r and pd.notna(r['category']) else "Uncategorized"
+                            spk_cat = str(r['speaker_category']).strip() if 'speaker_category' in r and pd.notna(r['speaker_category']) else "Non-Speaker"
+                            
+                            try:
+                                pax_num = int(r['accompanying_persons']) if 'accompanying_persons' in r and pd.notna(r['accompanying_persons']) else 0
+                            except:
+                                pax_num = 0
+                            
+                            s.execute(text("INSERT INTO admins (username, password) VALUES (:u, :p) ON CONFLICT DO NOTHING"),
+                                      {"u": a_user, "p": "password123"})
+                            
+                            existing = s.execute(text("SELECT id FROM guests WHERE name = :n AND admin_owner = :u"), 
+                                                 {"n": g_name, "u": a_user}).fetchone()
+                            
+                            if not existing:
+                                s.execute(text("""INSERT INTO guests 
+                                                  (name, admin_owner, poc, category, speaker_category, accompanying_persons) 
+                                                  VALUES (:n, :u, :poc, :cat, :spk, :pax)"""),
+                                          {"n": g_name, "u": a_user, "poc": poc_name, "cat": cat_name, "spk": spk_cat, "pax": pax_num})
+                        s.commit()
+                    st.success("CSV Processed! New guests added successfully.")
                     st.rerun()
-
-                st.title("DDP - Dignitary Details Page")
-                st.subheader(f"Dignitary: {guest_data['name']}")
-                
-                info_c1, info_c2, info_c3 = st.columns(3)
-                
-                with info_c1:
-                    st.markdown("### 🪪 Profile")
-                    st.write(f"**Category:** {guest_data['category']}")
-                    st.write(f"**Speaker Status:** {guest_data['speaker_category']}")
-                    pax_val = int(guest_data['accompanying_persons']) if pd.notna(guest_data['accompanying_persons']) else 0
-                    st.write(f"**Accompanying Pax:** {pax_val}")
-                    st.write(f"**POC Name:** {guest_data['poc']}")
-
-                with info_c2:
-                    st.markdown("### ✈️ Logistics")
-                    st.write(f"**Arrival:** {guest_data['arrival_time'] if pd.notna(guest_data['arrival_time']) else 'TBD'}")
-                    st.write(f"**Departure:** {guest_data['departure_time'] if pd.notna(guest_data['departure_time']) else 'TBD'}")
-                    st.write(f"**Admin Owner:** {guest_data['admin_owner']}")
-                    st.write(f"**Assigned GRE:** {guest_data['assigned_gre'] if pd.notna(guest_data['assigned_gre']) else 'Unassigned'}")
-                
-                with info_c3:
-                    st.markdown("### 🛎️ Ground Status")
-                    room_status = "✅ Clean" if guest_data['room_cleaned'] else "❌ Dirty/Pending"
-                    st.write(f"**Room Status:** {room_status}")
-                    pickup_status = "🚗 Sent" if guest_data['airport_pickup_sent'] else "⏳ Pending"
-                    st.write(f"**Airport Pickup:** {pickup_status}")
-                    
-                st.divider()
-                st.info("Additional guest information modules can be added here as we expand the database.")
-
 if __name__ == "__main__":
     main()
