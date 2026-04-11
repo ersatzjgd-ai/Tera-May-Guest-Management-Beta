@@ -1,5 +1,0 @@
-streamlit
-pandas
-psycopg2-binary
-sqlalchemy
-extra-streamlit-components==0.1.71
